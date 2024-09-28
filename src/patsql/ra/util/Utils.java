@@ -120,6 +120,101 @@ public class Utils {
 		}
 	}
 
+	/**
+	 * (Foresighter Mod)
+	 * Load a benchmark file with the unique identifier designed for the Foresighter CEGIS experiment.
+	 */
+	public static ScytheFileDataWithID loadFromScytheFileWithID(File input) {
+		String[] lines;
+		List<NamedTable> inputs = new ArrayList<>();
+		Table output = null;
+		List<Cell> constVals = new ArrayList<>();
+		String source = "None", group = "None", id = "None";
+
+		try {
+			lines = Files.lines(input.toPath(), StandardCharsets.UTF_8) //
+					.filter(line -> !line.startsWith("//")) //
+					.filter(line -> !line.trim().isEmpty()) //
+					.toArray(String[]::new);
+		} catch (IOException e) {
+			e.printStackTrace();
+			throw new RuntimeException("Scythe file read error :" + input.getAbsolutePath());
+		}
+
+		Set<String> usedInputTableNames = new HashSet<>();
+
+
+
+		int cursor = 0;
+		while (cursor < lines.length) {
+
+			String line = lines[cursor].trim();
+
+			if (line.startsWith("# Source:")) {
+				source = line.substring(9).trim();
+			} else if (line.startsWith("## Group:")) {
+				group = line.substring(9).trim();
+			} else if (line.startsWith("### ID:")) {
+				id = line.substring(7).trim();
+			}
+
+			// skip lines that doesn't belong to any segments.
+			if (!lines[cursor].startsWith("#")) {
+				cursor++;
+				continue;
+			}
+
+			String segmentName = lines[cursor].substring(1).trim();
+			cursor++;
+
+			// read lines within a segment.
+			List<String> linesInSegment = new ArrayList<>();
+			while (cursor < lines.length) {
+				line = lines[cursor].trim();
+				if (line.startsWith("#"))
+					break; // if it reaches the end of the segment.
+				linesInSegment.add(line);
+				cursor++;
+			}
+
+			if (segmentName.startsWith("input")) {
+				// segName might be like "input:tablea"
+				String tableName;
+				String baseTableName;
+				int table_id = 1;
+				if (segmentName.contains(":")) {
+					// if some name is specified, use it.
+					int idx = segmentName.lastIndexOf(":");
+					baseTableName = segmentName.substring(idx + 1);
+					tableName = baseTableName;
+				} else {
+					// if no name is specified, set
+					baseTableName = "input";
+					tableName = baseTableName + table_id;
+				}
+				while (usedInputTableNames.contains(tableName)) {
+					table_id++;
+					tableName = baseTableName + id;
+				}
+				usedInputTableNames.add(tableName);
+				Table table = parseTable(linesInSegment.toArray(new String[0]));
+				inputs.add(new NamedTable(tableName, table));
+			} else if (segmentName.startsWith("output")) {
+				output = parseTable(linesInSegment.toArray(new String[0]));
+			} else if (segmentName.startsWith("constraint")) {
+				String json = String.join(" ", linesInSegment);
+				constVals = parseConstraint(json);
+			} else if (segmentName.startsWith("solution")) {
+				// System.out.println("Stack Overflow Solution: " + segContent);
+			}
+		}
+
+		assert output != null;
+		ScytheFileData fileData = new ScytheFileData(inputs, output, constVals);
+		ScytheFileDataWithID scytheFileDataWithID = new ScytheFileDataWithID(fileData, source, group, id);
+		return scytheFileDataWithID;
+	}
+
 	public static ScytheFileData loadFromScytheFile(File input) {
 		String[] lines;
 		List<NamedTable> inputs = new ArrayList<>();
@@ -423,9 +518,7 @@ public class Utils {
 			Optional<Cell> constCell = stripType(constant);
 			ret.add(constCell.orElse(new Cell(constant, guessType(constant))));
 		}
-
 		// ignores aggregation function settings for now
-
 		return ret;
 	}
 

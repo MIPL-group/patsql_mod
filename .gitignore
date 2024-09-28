@@ -1,2 +1,7 @@
 /bin/
 /target/
+/test_cegis/
+/.idae/
+/.settings/
+/CEGIS_log/
+/test_cegis/

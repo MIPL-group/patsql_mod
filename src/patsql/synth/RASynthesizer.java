@@ -27,6 +27,7 @@ import patsql.entity.table.Column;
 import patsql.entity.table.Table;
 import patsql.entity.table.Type;
 import patsql.entity.table.agg.Agg;
+import patsql.generator.sql.SQLUtil;
 import patsql.ra.operator.BaseTable;
 import patsql.ra.operator.RA;
 import patsql.ra.operator.RAOperator;
@@ -48,6 +49,8 @@ import patsql.synth.sketcher.Sketcher;
 public class RASynthesizer implements Callable<RAOperator> {
 	final Example example;
 	final SynthOption option;
+	// (Foresighter Mod) Add a flag to handle termination of CEGIS solving process.
+	private volatile boolean isTerminating = false;
 
 	public RASynthesizer(Example example, SynthOption option) {
 		this.example = example;
@@ -57,6 +60,100 @@ public class RASynthesizer implements Callable<RAOperator> {
 	@Override
 	public RAOperator call() throws Exception {
 		return synthesize();
+	}
+
+
+	/**
+	 * (Foresigher Mod)
+	 * A wrapper for synthesizeCEGIS to run under a timeoff, can run in subprocess because it is continuous process of writing to CEGIS log.
+	 */
+	public List<RAOperator> synthesizeCEGIS(CEGISLogRecorder logger, int timeoutMs) {
+		ExecutorService service = Executors.newSingleThreadExecutor();
+		Future<List<RAOperator>> future = service.submit(() -> synthesizeCEGIS(logger));
+		List<RAOperator> result = null;
+		try {
+			result = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+		} catch (TimeoutException e) {
+			isTerminating = true;
+//			System.out.println("SYNTHESIS TIME OUT");
+			future.cancel(true);
+			// Give a small buffer time for final writes
+			try {
+				Thread.sleep(1000);
+			} catch (InterruptedException ie) {
+				Thread.currentThread().interrupt();
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		} finally {
+			service.shutdownNow();
+			logger.writeCSV();
+		}
+		return result;
+	}
+
+	/**
+	 * (Foresighter Mod)
+	 * Synthesize a benchmark problem, continuously output all founded solution to model CEGIS and record all solutions into a corresponding Log Recorder
+	 * @param logger CEGISRecordlogger
+	 * @return all solutions, but will also write to logger as side effect.
+	 */
+	private List<RAOperator> synthesizeCEGIS(CEGISLogRecorder logger) {
+		long startTime = System.currentTimeMillis();
+		List<RAOperator> allSolutions = new ArrayList<>();
+		int globalSolutionRank = 1;
+
+		boolean isOutputSorted = Arrays.stream(example.output.columns)
+				.map(col -> col.schema)
+				.anyMatch(schema -> example.output.isIncreasing(schema) || example.output.isDecreasing(schema));
+
+		Sketcher sketcher = new Sketcher(example.inputs.length, isOutputSorted);
+
+		int sizeOfSolutionSketch = -1;
+		sketch: for (RAOperator s : sketcher) {
+			int sizeOfSketch = Sketcher.sizeOf(s);
+
+			if (isTerminating) {
+				break;
+			}
+
+//			if (sizeOfSolutionSketch > 0 && sizeOfSketch > sizeOfSolutionSketch)
+//				break;
+
+			for (RAOperator sketch : assignNamesOnBaseTables(s)) {
+				if (Thread.currentThread().isInterrupted()) {
+					break sketch;
+				}
+				if (!isValidSketch(sketch)) {
+					continue;
+				}
+				if (Debug.isDebugMode) {
+					RAUtils.printSketch(sketch);
+				}
+				SketchFiller filler = new SketchFiller(sketch, example, option);
+				for (RAOperator basisProgram : filler.fillSketch()) {
+					if (!check(basisProgram))
+						continue;
+					// NOTE: Change here to output all solutions as found.
+					// Found a valid basis program
+					sizeOfSolutionSketch = sizeOfSketch;
+					// Enumerate equivalent programs
+					List<RAOperator> equivalentPrograms = enumurateEquivalentPrograms(basisProgram);
+					// Rank the equivalent programs
+					Collections.sort(equivalentPrograms, (a, b) -> heuristic(b) - heuristic(a));
+					// Log and collect all solutions from this basis program
+					for (RAOperator program : equivalentPrograms) {
+						String sqlQuery = SQLUtil.generateSQL(program);
+						long currentRuntime = System.currentTimeMillis() - startTime;
+						logger.addSolution("PATSQL", globalSolutionRank, sqlQuery, currentRuntime);
+						allSolutions.add(program);
+						globalSolutionRank++;
+					}
+				}
+			}
+		}
+
+		return allSolutions;
 	}
 
 	/**
